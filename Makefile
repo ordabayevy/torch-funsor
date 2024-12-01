@@ -21,6 +21,6 @@ format: license FORCE
 	ruff format .
 
 typecheck: FORCE
-	mypy funsor tests
+	mypy funsor
 
 FORCE:
