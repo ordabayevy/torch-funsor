@@ -173,7 +173,9 @@ class FunsorMeta(type):
     ) -> "Funsor":
         from funsor.interpretations import interpretation_stack
 
-        return interpretation_stack[-1].interpret(cls, *args, **kwargs)
+        self = interpretation_stack[-1].interpret(cls, *args, **kwargs)
+        assert self is not None, f"Interpretation failed to construct {cls} with args {args} and kwargs {kwargs}"
+        return self
 
 
 class Funsor(MetaProxy, metaclass=FunsorMeta):

@@ -31,7 +31,7 @@ class Interpretation(ContextDecorator):
     def __exit__(self, *exc) -> None:
         interpretation_stack.pop()
 
-    def interpret(self, cls: FunsorMeta, *args: Any, **kwargs: Any) -> Funsor:
+    def interpret(self, cls: FunsorMeta, *args: Any, **kwargs: Any) -> Funsor | None:
         """
         Interpret a Funsor class and its arguments.
         """
@@ -65,7 +65,7 @@ class PatternMatchingInterpretation(Interpretation):
         self.pattern_handlers.append((pattern_handler))
         return pattern_handler
 
-    def interpret(self, cls, *args, **kwargs):
+    def interpret(self, cls, *args, **kwargs) -> Funsor | None:
         """Perform structural pattern matching on the input."""
         kind, target, args, kwargs = cls.make_hash_key(*args, **kwargs)  # type: ignore[attr-defined]
         pattern = (kind, target, args, dict(kwargs))
@@ -73,6 +73,7 @@ class PatternMatchingInterpretation(Interpretation):
             result = pattern_handler(pattern)
             if result is not None:
                 return result
+        return None
 
 
 class PrioritizedInterpretation(Interpretation):
@@ -80,15 +81,16 @@ class PrioritizedInterpretation(Interpretation):
     Interpretation that delegates to a list of interpretations.
     """
 
-    def __init__(self, *subinterpretations: Interpretation):
+    def __init__(self, *subinterpretations: Interpretation) -> None:
         super().__init__("/".join(s.__name__ for s in subinterpretations))
         self.subinterpretations = subinterpretations
 
-    def interpret(self, cls, *args, **kwargs):
+    def interpret(self, cls, *args, **kwargs) -> Funsor | None:
         for interpretation in self.subinterpretations:
             result = interpretation.interpret(cls, *args, **kwargs)
             if result is not None:
                 return result
+        return None
 
 
 @CallableInterpretation
