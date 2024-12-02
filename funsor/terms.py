@@ -218,7 +218,7 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         return self._graph
 
     @property
-    def inputs(self) -> dict[str, Any]:
+    def inputs(self) -> dict[str, _AnnotatedAlias]:
         if self._inputs is None:
             self._inputs = {}
             for graph_node in self.graph.nodes:
@@ -228,7 +228,7 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         return self._inputs
 
     @property
-    def output(self) -> Any:
+    def output(self) -> _AnnotatedAlias:
         if self._output is None:
             self._output = Annotated[torch.Tensor, self.dtype, tuple(self.shape)]
         return self._output

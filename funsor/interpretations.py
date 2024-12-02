@@ -1,11 +1,15 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import inspect
 from collections.abc import Callable
 from contextlib import ContextDecorator
 from typing import Any
 
-from funsor.terms import Funsor, FunsorMeta, tracer_stack
+import torch.fx as fx
+from torch.fx.node import Target
+
+from funsor.terms import Funsor, FunsorMeta, Variable, tracer_stack
 
 
 class Interpretation(ContextDecorator):
@@ -47,6 +51,46 @@ class CallableInterpretation(Interpretation):
         return self.interpret_fn(cls, *args, **kwargs)
 
 
+class PatternMatchingInterpretation(Interpretation):
+    """
+    Interpretation that dispatches to a function based on a pattern.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.pattern_handlers: list[Callable] = []
+
+    def register(self, pattern_handler: Callable) -> Callable:
+        """Register a new pattern with its handler."""
+        self.pattern_handlers.append((pattern_handler))
+        return pattern_handler
+
+    def interpret(self, cls, *args, **kwargs):
+        """Perform structural pattern matching on the input."""
+        kind, target, args, kwargs = cls.make_hash_key(*args, **kwargs)  # type: ignore[attr-defined]
+        pattern = (kind, target, args, dict(kwargs))
+        for pattern_handler in self.pattern_handlers:
+            result = pattern_handler(pattern)
+            if result is not None:
+                return result
+
+
+class PrioritizedInterpretation(Interpretation):
+    """
+    Interpretation that delegates to a list of interpretations.
+    """
+
+    def __init__(self, *subinterpretations: Interpretation):
+        super().__init__("/".join(s.__name__ for s in subinterpretations))
+        self.subinterpretations = subinterpretations
+
+    def interpret(self, cls, *args, **kwargs):
+        for interpretation in self.subinterpretations:
+            result = interpretation.interpret(cls, *args, **kwargs)
+            if result is not None:
+                return result
+
+
 @CallableInterpretation
 def reflect(cls: FunsorMeta, *args: Any, **kwargs: Any) -> Funsor:
     """
@@ -65,5 +109,40 @@ def reflect(cls: FunsorMeta, *args: Any, **kwargs: Any) -> Funsor:
         return self
 
 
+eager_base = PatternMatchingInterpretation("eager")
+eager = PrioritizedInterpretation(eager_base, reflect)
+"""
+Eager exact naive interpretation wherever possible.
+"""
+
+
+@eager_base.register
+def eager_substitute(pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any]]) -> Funsor | None:
+    """
+    Interpret a Funsor substitution call.
+    """
+    match pattern:
+        case ("call_method", "__call__", (Funsor() as f, *args), kwargs):
+            sig = inspect.Signature(
+                [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in f.inputs]
+            )
+            subs = sig.bind_partial(*args, **kwargs).arguments
+
+            if not subs:
+                return f
+
+            for key in f.inputs:
+                if key not in subs:
+                    dtype, shape = f.inputs[key].__metadata__
+                    subs[key] = Variable(key, dtype, shape)
+                elif isinstance(subs[key], str):
+                    dtype, shape = f.inputs[key].__metadata__
+                    subs[key] = Variable(subs[key], dtype, shape)
+
+            interpreter = fx.Interpreter(f.tracer.root, graph=f.graph)
+            return interpreter.run(*tuple(subs[key] for key in f.inputs))
+    return None
+
+
 interpretation_stack: list[Interpretation] = []
-interpretation_stack.append(reflect)
+interpretation_stack.append(eager)
