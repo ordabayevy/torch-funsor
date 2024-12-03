@@ -1,6 +1,7 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import operator
 from typing import Annotated, Any, get_origin
 
 import torch
@@ -8,6 +9,47 @@ import torch.utils._pytree as pytree
 from typing_extensions import _AnnotatedAlias
 
 from funsor import Funsor
+
+OPERATOR_COMPARISON_OPS = [
+    operator.eq,
+    operator.ne,
+    operator.lt,
+    operator.le,
+    operator.ge,
+    operator.gt,
+]
+
+OPERATOR_BINARY_OPS = [
+    operator.add,
+    operator.sub,
+    operator.mul,
+    operator.truediv,
+    operator.floordiv,
+    operator.pow,
+] + OPERATOR_COMPARISON_OPS
+
+OPERATOR_BOOLEAN_OPS = [operator.and_, operator.or_, operator.xor]
+
+TORCH_COMPARISON_OPS = [
+    torch.eq,
+    torch.ne,
+    torch.lt,
+    torch.le,
+    torch.ge,
+    torch.gt,
+]
+
+TORCH_BINARY_OPS = [
+    torch.maximum,
+    torch.minimum,
+    torch.add,
+    torch.sub,
+    torch.mul,
+    torch.div,
+    torch.floor_divide,
+    torch.pow,
+    torch.logaddexp,
+] + TORCH_COMPARISON_OPS
 
 
 def normalize_domain(domain: Any) -> _AnnotatedAlias:
