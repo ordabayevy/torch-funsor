@@ -1,6 +1,9 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import math
+import operator
+
 import pytest
 import torch
 
@@ -52,3 +55,39 @@ def test_substitute():
         assert f(x=y) is y * y + y * z
         assert f(y=z, z=y) is x * z + x * y
         assert f(x=y, y=z, z=x) is y * z + y * x
+
+
+@pytest.mark.parametrize("op", ["abs", "neg"])
+@pytest.mark.parametrize("value", [0.0, 0.5, 1.0])
+def test_operator_unary(op, value):
+    with FunsorTracer():
+        expected = getattr(operator, op)(value)
+
+        x = Variable("x", torch.float32)
+        actual = getattr(operator, op)(x)(value)
+
+        assert actual == expected
+
+
+@pytest.mark.parametrize("op", ["fabs", "ceil", "floor", "exp", "expm1", "log", "log1p", "sqrt"])
+@pytest.mark.parametrize("value", [0.5, 1.0])
+def test_math_unary(op, value):
+    with FunsorTracer():
+        expected = getattr(math, op)(value)
+
+        x = Variable("x", torch.float32)
+        actual = getattr(math, op)(x)(value)
+
+        assert actual == expected
+
+
+@pytest.mark.parametrize("op", ["abs", "ceil", "floor", "exp", "expm1", "log", "log1p", "sqrt", "acos", "cos"])
+@pytest.mark.parametrize("value", [torch.tensor(0.0), torch.tensor(0.5), torch.tensor(1.0)])
+def test_torch_unary(op, value):
+    with FunsorTracer():
+        expected = getattr(torch, op)(value)
+
+        x = Variable("x", torch.float32)
+        actual = getattr(torch, op)(x)(value)
+
+        assert actual == expected

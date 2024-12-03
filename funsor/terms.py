@@ -1,6 +1,7 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import functools
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -9,6 +10,7 @@ import torch.fx as fx
 import torch.utils._pytree as pytree
 from torch._C import ScriptObject  # type: ignore[attr-defined]
 from torch._library.fake_class_registry import FakeScriptObject
+from torch.fx._symbolic_trace import _autowrap_check, _new_patcher, _patch_wrapped_functions
 from torch.fx.experimental.meta_tracer import (
     MetaProxy,
     MetaTracer,
@@ -18,12 +20,28 @@ from torch.fx.experimental.meta_tracer import (
 from torch.fx.node import Argument, Target
 from typing_extensions import _AnnotatedAlias
 
+# These need to run in global scope to handle nested calls correctly
+_orig_module_call: Callable = torch.nn.Module.__call__
+_orig_module_getattr: Callable = torch.nn.Module.__getattr__
+
 
 def node_to_meta(v):
     if isinstance(v, fx.Node):
         meta_val = v.meta.get("val")
         assert meta_val is not None, f"Node {v} does not have a meta value"
         return meta_val
+    return v
+
+
+def meta_to_scalar_zero(v):
+    if isinstance(v, torch.Tensor) and v.ndim == 0:
+        return torch.tensor(0, dtype=v.dtype).item()
+    return v
+
+
+def meta_to_scalar_one(v):
+    if isinstance(v, torch.Tensor) and v.ndim == 0:
+        return torch.tensor(1, dtype=v.dtype).item()
     return v
 
 
@@ -47,10 +65,46 @@ class FunsorTracer(MetaTracer):
 
     def __enter__(self) -> "FunsorTracer":
         tracer_stack.append(self)
+
+        parameter_proxy_cache: dict[str, fx.Proxy] = {}  # Reduce number of get_attr calls
+
+        # Method dispatch on parameters is not recorded unless it's directly used.
+        # Thus, we need to insert a proxy when __getattr__ requests a parameter.
+        @functools.wraps(_orig_module_getattr)
+        def module_getattr_wrapper(mod, attr):
+            attr_val = _orig_module_getattr(mod, attr)
+            return self.getattr(attr, attr_val, parameter_proxy_cache)
+
+        @functools.wraps(_orig_module_call)
+        def module_call_wrapper(mod, *args, **kwargs):
+            def forward(*args, **kwargs):
+                return _orig_module_call(mod, *args, **kwargs)
+
+            _autowrap_check(
+                self.patcher,  # type: ignore[has-type]
+                getattr(getattr(mod, "forward", mod), "__globals__", {}),
+                self._autowrap_function_ids,
+            )
+            return self.call_module(mod, forward, args, kwargs)
+
+        self.patcher = _new_patcher().__enter__()
+        # allow duplicate patches to support the case of nested calls
+        self.patcher.patch_method(
+            torch.nn.Module,
+            "__getattr__",
+            module_getattr_wrapper,
+            deduplicate=False,
+        )
+        self.patcher.patch_method(torch.nn.Module, "__call__", module_call_wrapper, deduplicate=False)
+        _patch_wrapped_functions(self.patcher)
+        _autowrap_check(self.patcher, globals(), self._autowrap_function_ids)
+        for module in self._autowrap_search:
+            _autowrap_check(self.patcher, module.__dict__, self._autowrap_function_ids)
         return self
 
     def __exit__(self, *exc: Any) -> None:
         tracer_stack.pop()
+        self.patcher.__exit__(*exc)
 
     def create_arg(self, a: Any) -> Argument:
         if isinstance(a, torch.Tensor):
@@ -101,6 +155,9 @@ class FunsorTracer(MetaTracer):
             if kind == "call_function":
                 assert callable(target)
                 meta_target = manual_meta_overrides.get(target, target)
+                if target.__module__ == "math":
+                    args_metas = pytree.tree_map(meta_to_scalar_one, args_metas)
+                    kwargs_metas = pytree.tree_map(meta_to_scalar_one, kwargs_metas)
                 meta_out = meta_target(*args_metas, **kwargs_metas)
             elif kind == "call_method":
                 assert isinstance(target, str)
@@ -109,13 +166,8 @@ class FunsorTracer(MetaTracer):
                     # RuntimeError: Tensor.item() cannot be called on meta tensors
                     # This is a workaround to convert scalar tensors to Python scalars
                     indices = args_metas[1]
-                    new_indices: tuple[int | float | torch.Tensor, ...] = ()
-                    for index in indices:
-                        if isinstance(index, torch.Tensor) and index.ndim == 0:
-                            new_indices += (torch.tensor(0, dtype=index.dtype).item(),)
-                        else:
-                            new_indices += (index,)
-                    args_metas = (args_metas[0], new_indices)
+                    indices = pytree.tree_map(meta_to_scalar_zero, indices)
+                    args_metas = (args_metas[0], indices)
                     meta_out = getattr(args_metas[0], target)(*args_metas[1:], **kwargs_metas)  # type: ignore[index]
                 elif target == "__call__":
                     meta_out = args_metas[0]
@@ -151,6 +203,8 @@ class FunsorTracer(MetaTracer):
 
         # Otherwise, create the node and cache it
         node = super().create_node(kind, target, args, kwargs)
+        if not isinstance(meta_out, torch.Tensor):
+            meta_out = torch.tensor(meta_out, device="meta")  # type: ignore[unreachable]
         node.meta["val"] = meta_out
         return node
 
