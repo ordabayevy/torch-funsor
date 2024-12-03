@@ -8,7 +8,12 @@ import pytest
 import torch
 
 from funsor import FunsorTracer, Variable
-from funsor.utilities.testing import check_funsor
+from funsor.utilities.testing import (
+    OPERATOR_BINARY_OPS,
+    OPERATOR_BOOLEAN_OPS,
+    TORCH_BINARY_OPS,
+    check_funsor,
+)
 
 
 def test_cons_hash():
@@ -89,5 +94,39 @@ def test_torch_unary(op, value):
 
         x = Variable("x", torch.float32)
         actual = getattr(torch, op)(x)(value)
+
+        assert actual == expected
+
+
+@pytest.mark.parametrize("value1", [0.0, 0.2, 1.0])
+@pytest.mark.parametrize("value2", [0.0, 0.8, 1.0])
+@pytest.mark.parametrize("binary_op", OPERATOR_BINARY_OPS + OPERATOR_BOOLEAN_OPS)
+def test_operator_binary(binary_op, value1: float, value2: float):
+    with FunsorTracer():
+        if binary_op in OPERATOR_BOOLEAN_OPS:
+            value1 = bool(value1)
+            value2 = bool(value2)
+        try:
+            expected = binary_op(value1, value2)
+        except ZeroDivisionError:
+            return
+
+        x1 = Variable("x1", torch.float32)
+        x2 = Variable("x2", torch.float32)
+        actual = binary_op(x1, x2)(value1, value2)
+
+        assert actual == expected
+
+
+@pytest.mark.parametrize("value1", [torch.tensor(0.0), torch.tensor(0.2), torch.tensor(1.0)])
+@pytest.mark.parametrize("value2", [torch.tensor(0.5), torch.tensor(1.0)])
+@pytest.mark.parametrize("binary_op", TORCH_BINARY_OPS)
+def test_torch_binary(binary_op, value1: torch.Tensor, value2: torch.Tensor):
+    with FunsorTracer():
+        expected = binary_op(value1, value2)
+
+        x1 = Variable("x1", value1.dtype)
+        x2 = Variable("x2", value2.dtype)
+        actual = binary_op(x1, x2)(value1, value2)
 
         assert actual == expected

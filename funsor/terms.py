@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import functools
+import inspect
+import math
 from collections.abc import Callable
+from types import ModuleType
 from typing import Annotated, Any
 
 import torch
@@ -46,8 +49,13 @@ def meta_to_scalar_one(v):
 
 
 class FunsorTracer(MetaTracer):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        autowrap_modules: tuple[ModuleType] = (math,),
+        autowrap_functions: tuple[Callable, ...] = (),
+        param_shapes_constant: bool = True,
+    ) -> None:
+        super().__init__(autowrap_modules, autowrap_functions, param_shapes_constant)
         self.root = torch.nn.Module()
         self.graph = fx.Graph(tracer_cls=type(self))
         self.tensor_attrs: dict[torch.Tensor | ScriptObject | FakeScriptObject, str] = {}
@@ -97,7 +105,10 @@ class FunsorTracer(MetaTracer):
         )
         self.patcher.patch_method(torch.nn.Module, "__call__", module_call_wrapper, deduplicate=False)
         _patch_wrapped_functions(self.patcher)
-        _autowrap_check(self.patcher, globals(), self._autowrap_function_ids)
+        current_frame = inspect.currentframe()  # Get the current frame
+        assert current_frame is not None
+        global_namespace = current_frame.f_globals  # Get the global namespace of the frame
+        _autowrap_check(self.patcher, global_namespace, self._autowrap_function_ids)
         for module in self._autowrap_search:
             _autowrap_check(self.patcher, module.__dict__, self._autowrap_function_ids)
         return self
