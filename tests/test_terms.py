@@ -7,13 +7,20 @@ import operator
 import pytest
 import torch
 
-from funsor import FunsorTracer, Variable
+from funsor import FunsorTracer, ShapedTensor, Variable
 from funsor.utilities.testing import (
     OPERATOR_BINARY_OPS,
     OPERATOR_BOOLEAN_OPS,
     TORCH_BINARY_OPS,
     check_funsor,
 )
+
+
+def test_shaped_tensor():
+    assert ShapedTensor[torch.float32, (3, 4)] == ShapedTensor[torch.float32, (3, 4)]
+    assert ShapedTensor[torch.float32, (3, 4)] != ShapedTensor[torch.float32, (3, 5)]
+    assert ShapedTensor[torch.float32, (3, 4)] != ShapedTensor[torch.float32, ()]
+    assert ShapedTensor[torch.float32, (3, 4)] != ShapedTensor[torch.float64, (3, 4)]
 
 
 def test_cons_hash():
@@ -130,3 +137,28 @@ def test_torch_binary(binary_op, value1: torch.Tensor, value2: torch.Tensor):
         actual = binary_op(x1, x2)(value1, value2)
 
         assert actual == expected
+
+
+# @pytest.mark.parametrize("op", [torch.sum, torch.prod, torch.max, torch.min][:1])
+# @pytest.mark.parametrize("reduced_names", [{"i"}, {"j"}, {"i", "j"}][:1])
+# def test_reduce(op, reduced_names):
+#     with FunsorTracer():
+#         i = Variable("i", int)
+#         j = Variable("j", int)
+#         import pdb
+
+#         pdb.set_trace()
+#         data = torch.randn(5, 3)
+#         x = data[i, j]
+#         y = x.reduce(op, frozenset({i}))
+#         reduced_vars = {Variable(name, int) for name in reduced_names}
+#         # actual = reduce(op, data[i, j], reduced_vars)
+
+#         expected = data.clone()
+#         reduce_dims = []
+#         if "i" in reduced_names:
+#             reduce_dims.append(0)
+#         if "j" in reduced_names:
+#             reduce_dims.append(1)
+#         expected = op(expected, dim=reduce_dims)
+#         assert actual == expected

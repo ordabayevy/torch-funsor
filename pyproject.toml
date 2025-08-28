@@ -47,7 +47,7 @@ dev = ["torch-funsor[docs,lint,mypy,test]"]
 "Discussion Forum" = "https://github.com/ordabayevy/torch-funsor/discussions"
 
 [tool.setuptools.packages.find]
-include = ["funsor.*"]
+include = ["funsor", "funsor.*"]
 
 [tool.setuptools.package-data]
 "funsor" = ["py.typed"]

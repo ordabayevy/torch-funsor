@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import operator
-from typing import Annotated, Any, get_origin
+from typing import Any
 
 import torch
-import torch.utils._pytree as pytree
-from typing_extensions import _AnnotatedAlias
+from torch.utils._pytree import tree_map
 
-from funsor import Funsor
+from funsor.tensor import Tensor
+from funsor.terms import Funsor, ShapedTensor
 
 OPERATOR_COMPARISON_OPS = [
     operator.eq,
@@ -51,33 +51,59 @@ TORCH_BINARY_OPS = [
     torch.logaddexp,
 ] + TORCH_COMPARISON_OPS
 
-
-def normalize_domain(domain: Any) -> _AnnotatedAlias:
-    if get_origin(domain) is Annotated:
-        assert domain.__origin__ is torch.Tensor
-        metadata = domain.__metadata__
-        if len(metadata) == 1:
-            dtype = metadata[0]
-            shape = ()
-        elif len(metadata) == 2:
-            dtype, shape = metadata
-        else:
-            raise ValueError(f"Invalid metadata: {metadata}. Expected (dtype,) or (dtype, shape).")
-
-    elif isinstance(domain, torch.dtype) or domain in (int, float):
-        dtype = domain
-        shape = ()
-    meta_val = torch.empty(shape, dtype=dtype, device="meta")
-    return Annotated[type(meta_val), meta_val.dtype, meta_val.shape]
+TORCH_BOOLEAN_OPS = [torch.logical_and, torch.logical_or, torch.logical_xor]
 
 
-def check_funsor(x: Funsor, inputs: dict[str, Any], output: Any | None = None, data: Funsor | None = None) -> None:
+def normalize_domain(domain: int | float | torch.dtype | ShapedTensor) -> ShapedTensor:
+    if isinstance(domain, torch.dtype) or domain in (int, float):
+        return ShapedTensor[domain, ()]
+    return domain
+
+
+def tensor_to_meta(x: Any) -> torch.Tensor:
+    if isinstance(x, (torch.Tensor, Tensor)):
+        return torch.empty(x.shape, dtype=x.dtype, device="meta")
+    return x
+
+
+def eval_shape(func, *args, **kwargs):
+    args, kwargs = tree_map(tensor_to_meta, [args, kwargs])
+    meta_val = func(*args, **kwargs)
+    return ShapedTensor[meta_val.dtype, meta_val.shape]
+
+
+def check_funsor(
+    x: torch.Tensor | Funsor,
+    inputs: dict[str, Any],
+    output: Any | None = None,
+    data: torch.Tensor | None = None,
+) -> None:
     """
     Check dims and shape modulo reordering.
     """
-    assert isinstance(x, Funsor)
-    inputs = pytree.tree_map(normalize_domain, inputs)
-    assert x.inputs == inputs
-    if output is not None:
+    if isinstance(x, torch.Tensor):
+        assert inputs == {}
         output = normalize_domain(output)
-        assert x.output == output
+        assert output.dtype == x.dtype
+        assert output.shape == x.shape
+        if data is not None:
+            # Use torch.allclose for tensor comparison to handle multi-element tensors
+            assert torch.allclose(data, x, rtol=1e-05, atol=1e-08, equal_nan=True)
+    elif isinstance(x, Funsor):
+        inputs = tree_map(normalize_domain, inputs)
+        assert x.inputs == inputs
+        if output is not None:
+            output = normalize_domain(output)
+            assert x.output == output
+        if data is not None:
+            # Use torch.allclose with equal_nan=True to handle NaN values correctly
+            assert torch.allclose(x.data, data, rtol=1e-05, atol=1e-08, equal_nan=True)
+    else:
+        raise ValueError(f"Unsupported type: {type(x)}")
+
+
+def assert_equiv(x: Funsor | torch.Tensor, y: Funsor | torch.Tensor) -> None:
+    if isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor):
+        assert torch.allclose(x, y, rtol=1e-05, atol=1e-08, equal_nan=True)
+    else:
+        check_funsor(x, y.inputs, y.output, y.align(x.indices).data)
