@@ -101,7 +101,6 @@ class FunsorTracer(MetaTracer):
         self.root = torch.nn.Module()
         self.graph = fx.Graph(tracer_cls=type(self))
         self.tensor_attrs: dict[torch.Tensor | ScriptObject | FakeScriptObject, str] = {}
-        self.meta_args: dict[str, torch.Tensor] = {}
         self.funsor_cache: dict[Any, Funsor] = {}
         self.parameter_attrs: dict[torch.nn.Parameter, str] = {}
 
@@ -196,7 +195,8 @@ class FunsorTracer(MetaTracer):
         # shape and dtype inference
         if kind == "placeholder":
             assert isinstance(target, str)
-            meta_out = self.meta_args[target]
+            assert type_expr is not None
+            meta_out = torch.empty(type_expr.shape, dtype=type_expr.dtype, device="meta")
         else:
             if target in self.orig_fns:
                 # NOTE: tensor constructors in PyTorch define the `device` argument as
@@ -266,7 +266,9 @@ class FunsorTracer(MetaTracer):
                 raise ValueError(f"Unsupported kind {kind}")
 
         # Otherwise, create the node and cache it
-        node = super().create_node(kind, target, args, kwargs)
+        if type_expr is None:
+            type_expr = ShapedTensor[meta_out.dtype, meta_out.shape]
+        node = super().create_node(kind, target, args, kwargs, type_expr=type_expr)
         if not isinstance(meta_out, torch.Tensor):
             meta_out = torch.tensor(meta_out, device="meta")  # type: ignore[unreachable]
         node.meta["val"] = meta_out
@@ -309,13 +311,14 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         target: Target,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
+        type_expr: Any | None = None,
     ) -> None:
         tracer = tracer_stack[-1]
         args_ = tracer.create_arg(args)
         kwargs_ = tracer.create_arg(kwargs)
         assert isinstance(args_, tuple)
         assert isinstance(kwargs_, dict)
-        node = tracer.create_node(kind, target, args_, kwargs_)
+        node = tracer.create_node(kind, target, args_, kwargs_, type_expr=type_expr)
         super().__init__(node, tracer)
         self.install_tensor_meta(self.node.meta["val"])
         self._inputs: dict[str, ShapedTensor] | None = None
@@ -323,8 +326,14 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         self._graph: fx.Graph | None = None
 
     @classmethod
-    def make_hash_key(cls, kind: str, target: Target, args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple:
-        return (kind, target, args, tuple(kwargs.items()))
+    def make_hash_key(
+        cls,
+        kind: str,
+        target: Target,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple:
+        return (kind, target, args, tuple(kwargs.items()), None)
 
     @property
     def graph(self) -> fx.Graph:
@@ -340,16 +349,15 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
     def inputs(self) -> dict[str, ShapedTensor]:
         if self._inputs is None:
             self._inputs = {}
-            for graph_node in self.graph.nodes:
-                if graph_node.op == "placeholder":
-                    meta_val = graph_node.meta["val"]
-                    self._inputs[graph_node.name] = ShapedTensor[meta_val.dtype, tuple(meta_val.shape)]
+            for node in self.graph.nodes:
+                if node.op == "placeholder":
+                    self._inputs[node.target] = node.type
         return self._inputs
 
     @property
     def output(self) -> ShapedTensor:
         if self._output is None:
-            self._output = ShapedTensor[self.dtype, tuple(self.shape)]
+            self._output = ShapedTensor[self.dtype, self.shape]
         return self._output
 
     @cached_property
@@ -390,22 +398,11 @@ class VariableMeta(FunsorMeta):
     def __call__(
         cls,
         name: str,
-        dtype: type[int] | type[float] | torch.dtype,
-        shape: tuple[int, ...] = (),
-        size: int | None = None,
+        dtype: torch.dtype,
+        shape: torch.Size = torch.Size(),
     ) -> "Variable":
-        tracer = tracer_stack[-1]
-        meta_val = torch.empty(shape, dtype=dtype, device="meta")  # type: ignore[arg-type]
-        if name in tracer.meta_args:
-            if tracer.meta_args[name].dtype != meta_val.dtype:
-                raise ValueError(f"Expected dtype {tracer.meta_args[name].dtype} but got {meta_val.dtype}")
-            if tracer.meta_args[name].shape != meta_val.shape:
-                raise ValueError(f"Expected shape {tracer.meta_args[name].shape} but got {meta_val.shape}")
-        else:
-            tracer.meta_args[name] = meta_val
-        self = super().__call__(name, dtype, shape, size)
-        assert isinstance(self, Variable)
-        return self
+        meta_val = torch.empty(shape, dtype=dtype, device="meta")
+        return super().__call__(name, meta_val.dtype, meta_val.shape)
 
 
 class Variable(Funsor, metaclass=VariableMeta):
@@ -431,29 +428,26 @@ class Variable(Funsor, metaclass=VariableMeta):
     def __init__(
         self,
         name: str,
-        dtype: type[int] | type[float] | torch.dtype,
-        shape: tuple[int, ...] = (),
-        size: int | None = None,
+        dtype: torch.dtype,
+        shape: torch.Size = torch.Size(),
     ) -> None:
-        super().__init__("placeholder", name, (), {})
-        self.size = size
+        super().__init__("placeholder", name, (), {}, type_expr=ShapedTensor[dtype, shape])
 
     @classmethod
     def make_hash_key(  # type: ignore[override]
         cls,
         name: str,
-        dtype: type[int] | type[float] | torch.dtype,
-        shape: tuple[int, ...] = (),
-        size: int | None = None,
+        dtype: torch.dtype,
+        shape: torch.Size = torch.Size(),
     ) -> tuple:
-        return ("placeholder", name, (), ())
+        return ("placeholder", name, (), (), ShapedTensor[dtype, shape])
 
     @property
     def name(self) -> str:
-        return self.node.name
+        return self.node.target
 
     def __repr__(self) -> str:
-        return f"Variable({self.name}: {self.output}, size={self.size})"
+        return f"Variable({self.name}: {self.output})"
 
 
 def normal(loc, scale, value):

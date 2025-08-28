@@ -99,20 +99,20 @@ class Tensor(Funsor, metaclass=TensorMeta):
     def make_hash_key(  # type: ignore[override]
         cls, data: torch.Tensor, indices: tuple[Funsor, ...] = ()
     ) -> tuple:
-        return ("call_method", "__getitem__", (data, indices), ())
+        return ("call_method", "__getitem__", (data, indices), (), None)
 
     def __repr__(self) -> str:
         return f"Tensor({self.data})"
 
-    def __call__(self, *args, **kwargs):
-        def materialize(x):
-            if isinstance(x, Funsor) and not isinstance(x, (Variable, Tensor)):
-                return self.materialize(x)
-            return x
+    # def __call__(self, *args, **kwargs):
+    #     def materialize(x):
+    #         if isinstance(x, Funsor) and not isinstance(x, (Variable, Tensor)):
+    #             return self.materialize(x)
+    #         return x
 
-        args, kwargs = tree_map(materialize, (args, kwargs))
+    #     args, kwargs = tree_map(materialize, (args, kwargs))
 
-        return super().__call__(*args, **kwargs)
+    #     return super().__call__(*args, **kwargs)
 
     def align(self, indices: tuple[Funsor, ...]) -> "Tensor":
         nodes = [index.node for index in indices]
@@ -186,25 +186,50 @@ class Tensor(Funsor, metaclass=TensorMeta):
             raise ValueError
         stop = min(dtype, max(start, stop))
         data = torch.arange(start, stop, step)
-        indices = (Variable(name, int, size=len(data)),)
+        indices = (Variable(name, int),)
         return Tensor(data, indices)
 
-    def materialize(self, x: Funsor) -> Funsor:
-        """
-        Attempt to convert a Funsor to a :class:`~funsor.terms.Number` or
-        :class:`Tensor` by substituting :func:`arange` s into its free variables.
+    # def materialize(self, x: Funsor) -> Funsor:
+    #     """
+    #     Attempt to convert a Funsor to a :class:`~funsor.terms.Number` or
+    #     :class:`Tensor` by substituting :func:`arange` s into its free variables.
 
-        :arg Funsor x: A funsor.
-        :rtype: Funsor
-        """
-        assert isinstance(x, Funsor)
-        if isinstance(x, (int, float, Tensor)):
-            return x
-        subs = {}
-        for name, domain in x.inputs.items():
-            if domain.dtype == torch.int64:
-                subs[name] = self.new_arange(name, Variable(name, int).size)
-        return x(**subs)
+    #     :arg Funsor x: A funsor.
+    #     :rtype: Funsor
+    #     """
+    #     assert isinstance(x, Funsor)
+    #     if isinstance(x, (int, float, Tensor)):
+    #         return x
+    #     subs = {}
+    #     for name, domain in x.inputs.items():
+    #         if domain.dtype == torch.int64:
+    #             subs[name] = self.new_arange(name, Variable(name, int).size)
+    #     return x(**subs)
+
+    def reduce(self, op, reduced_vars: frozenset["Variable"] | None = None):
+        if reduced_vars is None:
+            reduced_vars = self.indices
+        reduced_nodes = [var.node for var in reduced_vars]
+        reduced_dims = tuple(d for d, var in enumerate(self.indices) if var.node in reduced_nodes)
+        new_indices = tuple(var for var in self.indices if var.node not in reduced_nodes)
+
+        # Handle different PyTorch operations with different dim parameter requirements
+        if op in [torch.prod]:
+            # torch.prod expects individual dimensions, not a tuple
+            if len(reduced_dims) == 0:
+                data = self.data
+            elif len(reduced_dims) == 1:
+                data = op(self.data, dim=reduced_dims[0])
+            else:
+                # For multiple dimensions, reduce one by one
+                data = self.data
+                # Reduce in reverse order to maintain dimension indices
+                for dim in sorted(reduced_dims, reverse=True):
+                    data = op(data, dim=dim)
+        else:
+            data = op(self.data, dim=reduced_dims)
+
+        return Tensor(data, new_indices)
 
 
 class TensorAttribute(fx.Proxy):

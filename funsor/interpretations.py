@@ -1,17 +1,15 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
-import inspect
 from collections.abc import Callable
 from contextlib import ContextDecorator
 from typing import Any
 
 import torch
-import torch.fx as fx
 from torch.fx.node import Target
 
-from funsor.tensor import Tensor
-from funsor.terms import Funsor, FunsorMeta, Variable, tracer_stack
+from funsor.tensor import Tensor, TensorMeta
+from funsor.terms import Funsor, FunsorMeta, tracer_stack
 
 
 class Interpretation(ContextDecorator):
@@ -69,8 +67,8 @@ class PatternMatchingInterpretation(Interpretation):
 
     def interpret(self, cls, *args, **kwargs) -> Funsor | None:
         """Perform structural pattern matching on the input."""
-        kind, target, args, kwargs = cls.make_hash_key(*args, **kwargs)  # type: ignore[attr-defined]
-        pattern = (kind, target, args, dict(kwargs))
+        kind, target, args, kwargs, type_expr = cls.make_hash_key(*args, **kwargs)  # type: ignore[attr-defined]
+        pattern = (kind, target, args, dict(kwargs), type_expr)
         for pattern_handler in self.pattern_handlers:
             result = pattern_handler(cls, pattern)
             if result is not None:
@@ -113,94 +111,34 @@ def reflect(cls: FunsorMeta, *args: Any, **kwargs: Any) -> Funsor:
         return self
 
 
-bind_variable = PatternMatchingInterpretation("bind_variable")
-
-
-# @bind_variable.register
-# def bind_variable_getitem(
-#     cls: FunsorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any]]
-# ) -> Funsor | None:
-#     match pattern:
-#         case ("call_method", "__getitem__", (f, args), kwargs) if any(isinstance(arg, Variable) for arg in args):
-#             for size, arg in zip(f.shape, args):
-#                 if isinstance(arg, Variable):
-#                     if arg.size is not None:
-#                         assert arg.size == size, (
-#                             f"Variable {arg.name} already bound to size {arg.size}, cannot rebind to size {size}"
-#                         )
-#                     arg.size = size
-#             return
-#         case ("call_function", operator.getitem, (f, *args), kwargs) if any(isinstance(arg, Variable) for arg in args):
-#             for size, arg in zip(f.shape, args):
-#                 if isinstance(arg, Variable):
-#                     if arg.size is not None:
-#                         assert arg.size == size, (
-#                             f"Variable {arg.name} already bound to size {arg.size}, cannot rebind to size {size}"
-#                         )
-#                     arg.size = size
-#             return
-
-
 eager_base = PatternMatchingInterpretation("eager")
-eager = PrioritizedInterpretation(bind_variable, eager_base, reflect)
+eager = PrioritizedInterpretation(eager_base, reflect)
 """
 Eager exact naive interpretation wherever possible.
 """
 
 
 @eager_base.register
-def eager_substitute(cls: FunsorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any]]) -> Funsor | None:
-    """
-    Interpret a Funsor substitution call.
-    """
+def eager_tensor(
+    cls: FunsorMeta | TensorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any], Any | None]
+) -> Funsor | None:
     match pattern:
-        case ("call_method", "__call__", (Funsor() as f, *args), kwargs):
-            sig = inspect.Signature(
-                [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in f.inputs]
-            )
-            subs = sig.bind_partial(*args, **kwargs).arguments
-
-            if not subs:
-                return f
-
-            for key in f.inputs:
-                if key not in subs:
-                    dtype, shape = f.inputs[key].dtype, f.inputs[key].shape
-                    subs[key] = Variable(key, dtype, shape)
-                elif isinstance(subs[key], str):
-                    dtype, shape = f.inputs[key].dtype, f.inputs[key].shape
-                    subs[key] = Variable(subs[key], dtype, shape)
-
-            interpreter = fx.Interpreter(f.tracer.root, graph=f.graph)
-            return interpreter.run(*tuple(subs[key] for key in f.inputs))
-    return None
-
-
-@eager_base.register
-def eager_tensor(cls: FunsorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any]]) -> Funsor | None:
-    match pattern:
-        case ("call_method", "__getitem__", (torch.Tensor() as data, indices), kwargs):
+        case ("call_method", "__getitem__", (torch.Tensor() as data, indices), _, None):
             if cls is Tensor:
                 return None
             return Tensor(data, indices)
-        # case ("call_method", "__getitem__", (Tensor() as tensor, indices), kwargs):
-        #     if all(isinstance(idx, Funsor) for idx in indices):
-        #         return None
-        #     return None
-        # case ("call_function", operator.getitem, (torch.Tensor() as f, args), kwargs):
-        #     return Tensor(f, args)
-        # case ("call_function", operator.getitem, (Tensor() as f, args), kwargs):
-        #     return f[args]
     return None
 
 
 @eager_base.register
-def eager_reduce(cls: FunsorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any]]) -> Funsor | None:
+def eager_reduce(
+    cls: FunsorMeta | TensorMeta, pattern: tuple[str, Target, tuple[Any, ...], dict[str, Any], Any | None]
+) -> Funsor | None:
     """
     Interpret a Funsor reduction call.
     """
     match pattern:
-        case ("call_function", "reduce", (Funsor() as f, *args), kwargs):
+        case ("call_function", "reduce", (Funsor() as f, *args), kwargs, None):
             return f.reduce(*args, **kwargs)
     return None
 
