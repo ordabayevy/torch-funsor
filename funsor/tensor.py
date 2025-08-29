@@ -141,8 +141,9 @@ class Tensor(Funsor, metaclass=TensorMeta):
         return Tensor(permuted_data, indices)
 
     @classmethod
-    def __torch_function__(cls, func, types, args, kwargs=None):
-        kwargs = kwargs or {}
+    def __torch_function__(cls, func, types, args=None, kwargs=None):
+        args = args if args else ()
+        kwargs = kwargs if kwargs else {}
 
         # Delegate to superclass if any funsor arguments are not Tensor/Variable
         if tree_any(lambda x: isinstance(x, Funsor) and not isinstance(x, Tensor), [args, kwargs]):

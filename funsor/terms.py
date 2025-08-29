@@ -14,9 +14,7 @@ from typing import Any, cast
 import torch
 import torch.fx as fx
 import torch.utils._pytree as pytree
-from torch._C import ScriptObject  # type: ignore[attr-defined]
-from torch._library.fake_class_registry import FakeScriptObject
-from torch.fx._symbolic_trace import _autowrap_check, _new_patcher, _patch_wrapped_functions
+from torch.fx._symbolic_trace import _autowrap_check, _ConstantAttributeType, _new_patcher, _patch_wrapped_functions
 from torch.fx.experimental.meta_tracer import (
     MetaProxy,
     MetaTracer,
@@ -24,7 +22,6 @@ from torch.fx.experimental.meta_tracer import (
     manual_meta_overrides,
 )
 from torch.fx.node import Argument, Target
-from torch.types import _Number
 
 # These need to run in global scope to handle nested calls correctly
 _orig_module_call: Callable = torch.nn.Module.__call__
@@ -35,7 +32,7 @@ class ShapedTensorMeta(torch._C._TensorMeta):
     dtype: torch.dtype
     shape: torch.Size
 
-    def __eq__(cls, other):
+    def __eq__(cls, other: Any) -> bool:
         """Check if two ShapedTensor classes are equal based on dtype and shape."""
         return (
             isinstance(other, type)
@@ -47,16 +44,16 @@ class ShapedTensorMeta(torch._C._TensorMeta):
             and cls.shape == other.shape
         )
 
-    def __hash__(cls):
+    def __hash__(cls) -> int:
         """Make ShapedTensor types hashable based on dtype and shape."""
         return hash((cls.dtype, cls.shape))
 
-    def __repr__(cls):
+    def __repr__(cls) -> str:
         if not cls.shape:
             return f"{cls.dtype}"
         return f"{cls.dtype}[{', '.join(map(str, cls.shape))}]"
 
-    def __getitem__(cls, args):
+    def __getitem__(cls, args: Any) -> type[ShapedTensor]:
         # allow both ShapedTensor[dtype, (h,w)] and ShapedTensor[(dtype, (h,w))]
         if not isinstance(args, tuple):
             args = (args,)
@@ -69,7 +66,7 @@ class ShapedTensorMeta(torch._C._TensorMeta):
         name = f"ShapedTensor[{meta_val.dtype}, {meta_val.shape}]"
 
         # Create a *new class* carrying the metadata
-        return ShapedTensorMeta(name, (cls,), {"dtype": meta_val.dtype, "shape": meta_val.shape})
+        return ShapedTensorMeta(name, (cls,), {"dtype": meta_val.dtype, "shape": meta_val.shape})  # type: ignore[return-value]
 
 
 class ShapedTensor(torch.Tensor, metaclass=ShapedTensorMeta):
@@ -106,7 +103,7 @@ class FunsorTracer(MetaTracer):
         super().__init__(autowrap_modules, autowrap_functions, param_shapes_constant)
         self.root = torch.nn.Module()
         self.graph = fx.Graph(tracer_cls=type(self))
-        self.tensor_attrs: dict[torch.Tensor | ScriptObject | FakeScriptObject, str] = {}
+        self.tensor_attrs: dict[_ConstantAttributeType, str] = {}
         self.funsor_cache: dict[Any, Funsor] = {}
         self.parameter_attrs: dict[torch.nn.Parameter, str] = {}
 
@@ -370,7 +367,7 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
     def input_vars(self) -> frozenset["Variable"]:
         return frozenset(Variable(key, value.dtype, value.shape) for key, value in self.inputs.items())
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> "Funsor" | torch.Tensor:  # type: ignore[override]
         sig = inspect.Signature(
             [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD) for name in self.inputs]
         )
@@ -393,11 +390,8 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
     def __repr__(self) -> str:
         return f"Funsor({', '.join([f'{name}: {domain}' for name, domain in self.inputs.items()])}) -> {self.output}"
 
-    def reduce(self, op, reduced_vars: frozenset["Variable"]):
-        res = self.tracer.create_proxy("call_function", reduce, (op, self, reduced_vars), {})
-        for var in reduced_vars:
-            res = res(**{var.name: f"{var.name}__bound"})
-        return res
+    def reduce(self, op: Callable, reduced_vars: frozenset["Variable"]) -> "Funsor":
+        raise NotImplementedError
 
 
 class VariableMeta(FunsorMeta):
@@ -454,54 +448,3 @@ class Variable(Funsor, metaclass=VariableMeta):
 
     def __repr__(self) -> str:
         return f"Variable({self.name}: {self.output})"
-
-
-def normal(loc, scale, value):
-    # compute the variance
-    var = scale**2
-    log_scale = math.log(scale) if isinstance(scale, _Number) else scale.log()
-    return -((value - loc) ** 2) / (2 * var) - log_scale - math.log(math.sqrt(2 * math.pi))
-
-
-class Normal(Funsor):
-    def __init__(self, loc, scale, value=None):
-        if value is None:
-            value = Variable("value", torch.float32)
-        super().__init__("call_function", normal, (loc, scale, value), {})
-
-    @classmethod
-    def make_hash_key(  # type: ignore[override]
-        cls, loc, scale, value=None
-    ) -> tuple:
-        return ("call_function", normal, (loc, scale, value), ())
-
-
-def integrate(log_measure, integrand, reduced_vars):
-    return (log_measure.exp() * integrand).reduce(torch.sum, reduced_vars)
-
-
-def reduce(op, arg: Funsor, reduced_vars: set[Variable]):
-    # for var in reduced_vars:
-    #     name = var.name
-    #     values = torch.arange(var.size)
-    #     values = values.unsqueeze(1)
-
-    #     def index(idx):
-    #         return arg(**{name: idx})
-
-    #     batch_index = torch.vmap(index, in_dims=0, out_dims=0)
-    #     res = batch_index(values)
-    #     arg = op(res, dim=0).squeeze(0)
-    # return arg
-    return arg
-
-
-class Integrate(Funsor):
-    def __init__(self, log_measure, integrand, reduced_vars):
-        super().__init__("call_function", integrate, (log_measure, integrand, reduced_vars), {})
-
-    @classmethod
-    def make_hash_key(  # type: ignore[override]
-        cls, log_measure, integrand, reduced_vars
-    ) -> tuple:
-        return ("call_function", integrate, (log_measure, integrand, reduced_vars), ())
