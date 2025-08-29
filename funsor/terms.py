@@ -1,5 +1,6 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
+from __future__ import annotations
 
 import functools
 import inspect
@@ -8,7 +9,7 @@ import operator
 from collections.abc import Callable
 from functools import cached_property
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.fx as fx
@@ -31,6 +32,9 @@ _orig_module_getattr: Callable = torch.nn.Module.__getattr__
 
 
 class ShapedTensorMeta(torch._C._TensorMeta):
+    dtype: torch.dtype
+    shape: torch.Size
+
     def __eq__(cls, other):
         """Check if two ShapedTensor classes are equal based on dtype and shape."""
         return (
@@ -52,9 +56,7 @@ class ShapedTensorMeta(torch._C._TensorMeta):
             return f"{cls.dtype}"
         return f"{cls.dtype}[{', '.join(map(str, cls.shape))}]"
 
-
-class ShapedTensor(torch.Tensor):
-    def __class_getitem__(cls, args):
+    def __getitem__(cls, args):
         # allow both ShapedTensor[dtype, (h,w)] and ShapedTensor[(dtype, (h,w))]
         if not isinstance(args, tuple):
             args = (args,)
@@ -68,6 +70,10 @@ class ShapedTensor(torch.Tensor):
 
         # Create a *new class* carrying the metadata
         return ShapedTensorMeta(name, (cls,), {"dtype": meta_val.dtype, "shape": meta_val.shape})
+
+
+class ShapedTensor(torch.Tensor, metaclass=ShapedTensorMeta):
+    pass
 
 
 def node_to_meta(v):
@@ -166,9 +172,9 @@ class FunsorTracer(MetaTracer):
             a.meta["val"] = meta_val
             return a
         elif isinstance(a, type(torch.sum)):
-            return a
+            return a  # type: ignore[return-value]
         elif isinstance(a, frozenset):
-            return frozenset(self.create_arg(elem) for elem in a)
+            return frozenset(self.create_arg(elem) for elem in a)  # type: ignore[return-value]
         return super().create_arg(a)
 
     def create_proxy(
@@ -290,7 +296,7 @@ class FunsorMeta(type):
         cls,
         *args: Any,
         **kwargs: Any,
-    ) -> "Funsor":
+    ) -> "Funsor" | torch.Tensor:
         from funsor.interpretations import interpretation_stack
 
         self = interpretation_stack[-1].interpret(cls, *args, **kwargs)
@@ -321,8 +327,8 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         node = tracer.create_node(kind, target, args_, kwargs_, type_expr=type_expr)
         super().__init__(node, tracer)
         self.install_tensor_meta(self.node.meta["val"])
-        self._inputs: dict[str, ShapedTensor] | None = None
-        self._output: ShapedTensor | None = None
+        self._inputs: dict[str, type[ShapedTensor]] | None = None
+        self._output: type[ShapedTensor] | None = None
         self._graph: fx.Graph | None = None
 
     @classmethod
@@ -346,7 +352,7 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         return self._graph
 
     @property
-    def inputs(self) -> dict[str, ShapedTensor]:
+    def inputs(self) -> dict[str, type[ShapedTensor]]:
         if self._inputs is None:
             self._inputs = {}
             for node in self.graph.nodes:
@@ -355,7 +361,7 @@ class Funsor(MetaProxy, metaclass=FunsorMeta):
         return self._inputs
 
     @property
-    def output(self) -> ShapedTensor:
+    def output(self) -> type[ShapedTensor]:
         if self._output is None:
             self._output = ShapedTensor[self.dtype, self.shape]
         return self._output
@@ -402,7 +408,7 @@ class VariableMeta(FunsorMeta):
         shape: torch.Size = torch.Size(),
     ) -> "Variable":
         meta_val = torch.empty(shape, dtype=dtype, device="meta")
-        return super().__call__(name, meta_val.dtype, meta_val.shape)
+        return cast(Variable, super().__call__(name, meta_val.dtype, meta_val.shape))
 
 
 class Variable(Funsor, metaclass=VariableMeta):
@@ -444,7 +450,7 @@ class Variable(Funsor, metaclass=VariableMeta):
 
     @property
     def name(self) -> str:
-        return self.node.target
+        return cast(str, self.node.target)
 
     def __repr__(self) -> str:
         return f"Variable({self.name}: {self.output})"
@@ -460,7 +466,7 @@ def normal(loc, scale, value):
 class Normal(Funsor):
     def __init__(self, loc, scale, value=None):
         if value is None:
-            value = Variable("value", float)
+            value = Variable("value", torch.float32)
         super().__init__("call_function", normal, (loc, scale, value), {})
 
     @classmethod

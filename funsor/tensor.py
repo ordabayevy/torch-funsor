@@ -1,8 +1,10 @@
 # Copyright Contributors to the TorchFunsor project.
 # SPDX-License-Identifier: BSD-3-Clause
 
+from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 
 import torch
 import torch.fx as fx
@@ -39,7 +41,7 @@ def _expand_ellipsis(indices: tuple, tensor_shape: tuple) -> tuple:
 
 
 class TensorMeta(FunsorMeta):
-    def __call__(cls, data: torch.Tensor, indices: tuple[Funsor, ...] = ()) -> "Tensor":
+    def __call__(cls, data: torch.Tensor, indices: tuple[Funsor, ...] = ()) -> "Tensor" | torch.Tensor:
         if len(indices) == 0:
             return data
 
@@ -88,6 +90,8 @@ class Tensor(Funsor, metaclass=TensorMeta):
         indices:
             The indices of the tensor.
     """
+
+    __getitem__: Callable[..., Tensor]
 
     def __init__(self, data: torch.Tensor, indices: tuple[Funsor, ...] = ()) -> None:
         super().__init__("call_method", "__getitem__", (data, indices), {})
@@ -186,7 +190,7 @@ class Tensor(Funsor, metaclass=TensorMeta):
             raise ValueError
         stop = min(dtype, max(start, stop))
         data = torch.arange(start, stop, step)
-        indices = (Variable(name, int),)
+        indices = (Variable(name, torch.int64),)
         return Tensor(data, indices)
 
     # def materialize(self, x: Funsor) -> Funsor:
@@ -208,7 +212,8 @@ class Tensor(Funsor, metaclass=TensorMeta):
 
     def reduce(self, op, reduced_vars: frozenset["Variable"] | None = None):
         if reduced_vars is None:
-            reduced_vars = self.indices
+            # Convert tuple of Funsor to frozenset of Variable by casting
+            reduced_vars = frozenset(var for var in self.indices if isinstance(var, Variable))
         reduced_nodes = [var.node for var in reduced_vars]
         reduced_dims = tuple(d for d, var in enumerate(self.indices) if var.node in reduced_nodes)
         new_indices = tuple(var for var in self.indices if var.node not in reduced_nodes)
@@ -361,7 +366,7 @@ for orig_method_name in reflectable_magic_methods:
     _define_reflectable(orig_method_name)
 
 
-def align_tensor(new_indices: tuple[Tensor | torch.Tensor, ...], x: Tensor, expand: bool = False) -> torch.Tensor:
+def align_tensor(new_indices: tuple[Funsor, ...], x: Tensor | torch.Tensor, expand: bool = False) -> torch.Tensor:
     r"""
     Permute and add dims to a tensor to match desired ``new_indices``.
 
